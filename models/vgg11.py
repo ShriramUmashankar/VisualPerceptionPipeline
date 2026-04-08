@@ -4,27 +4,34 @@
 from typing import Dict, Tuple, Union
 import torch
 import torch.nn as nn
+from models.layers import CustomDropout
 
 
 class VGG11Encoder(nn.Module):
     """VGG11-style encoder with optional intermediate feature returns."""
 
-    def __init__(self, in_channels: int = 3, bn: bool = True):
+    def __init__(self, in_channels: int = 3, bn: bool = True, dropout_p: float =0.0):
         super().__init__()
 
         # NOTE : Deafult Stride = 1, Padding = 1 ( As per paper)
 
+        self.dropout_p = dropout_p
         self.batch_norm = bn
 
-        def make_conv_layer(in_c, out_c):
+
+        def make_conv_layer(in_c, out_c, use_dropout = False):
             layers = []
             # bias is False if batch_norm is True
             layers.append(nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=not self.batch_norm))
             
             if self.batch_norm:
-                layers.append(nn.BatchNorm2d(out_c))
+                layers.append(nn.BatchNorm2d(out_c))    
                 
             layers.append(nn.ReLU(inplace=True))
+
+            if use_dropout and self.dropout_p > 0:
+                layers.append(CustomDropout(self.dropout_p))  
+
             return nn.Sequential(*layers)
 
         # -------- Block 1 --------
@@ -44,15 +51,15 @@ class VGG11Encoder(nn.Module):
 
         # -------- Block 4 --------
         self.block4 = nn.Sequential(
-            make_conv_layer(256, 512),
-            make_conv_layer(512, 512)
+            make_conv_layer(256, 512, use_dropout=True),
+            make_conv_layer(512, 512, use_dropout=True),
         )
         self.pool4 = nn.MaxPool2d(2, 2)
 
         # -------- Block 5 --------
         self.block5 = nn.Sequential(
-            make_conv_layer(512, 512),
-            make_conv_layer(512, 512)
+            make_conv_layer(512, 512, use_dropout=True),
+            make_conv_layer(512, 512, use_dropout=True),
         )
         self.pool5 = nn.MaxPool2d(2, 2)
 
@@ -89,7 +96,6 @@ class VGG11Encoder(nn.Module):
 
         # -------- Block 5 --------
         x = self.block5(x)
-        x = self.dropout(x)  # easy hook point
         if return_features:
             features["block5"] = x
         x = self.pool5(x)

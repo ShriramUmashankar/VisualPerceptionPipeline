@@ -9,6 +9,13 @@ class CustomDropout(nn.Module):
     """Channel-wise (spatial) dropout."""
 
     def __init__(self, p: float = 0.5):
+        """
+        Initialize the CustomDropout layer.
+
+        Args:
+            p: Dropout probability.
+        """
+
         super().__init__()
 
         if not 0.0 <= p < 1.0:
@@ -17,17 +24,32 @@ class CustomDropout(nn.Module):
         self.p = p
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # During evaluation or if p = 0 -- do nothing
+        """
+        Forward pass for the CustomDropout layer.
+
+        Args:
+            x: Input tensor for shape [B, C, H, W].
+
+        Returns:
+            Output tensor.
+        """
+
+        # During evaluation or if p = 0 - do nothing
         if not self.training or self.p == 0.0:
             return x
 
-        B, C, H, W = x.shape
+        if x.dim() == 1:
+            # FC-style (element-wise) dropout
+            mask = (torch.rand_like(x) > self.p).float()
+            return x * mask / (1.0 - self.p)
 
-        # Create channel-wise mask
-        # Shape: [B, C, 1, 1] → broadcast over H, W
-        mask = (torch.rand(B, C, 1, 1, device=x.device) > self.p).float()
+        elif x.dim() == 4:
+            # Conv-style (channel-wise) dropout
+            B, C, H, W = x.shape
+            mask = (torch.rand(B, C, 1, 1, device=x.device) > self.p).float()
+            return x * mask / (1.0 - self.p)
 
-        # Apply mask and scale
-        x = x * mask / (1.0 - self.p)
-
-        return x
+        else:
+            raise ValueError(
+                f"Unsupported input shape {x.shape}. Expected 1D or 4D tensor."
+            )

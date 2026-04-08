@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn as nn
-
+from models.vgg11 import VGG11Encoder  
 
 class VGG11Classifier(nn.Module):
     """Full classifier = VGG11Encoder + ClassificationHead."""
@@ -16,7 +16,24 @@ class VGG11Classifier(nn.Module):
             in_channels: Number of input channels.
             dropout_p: Dropout probability for the classifier head.
         """
-        pass
+        super().__init__()
+        # Encoder
+        self.encoder = VGG11Encoder(in_channels=in_channels, dropout_p= dropout_p)
+
+        # Adaptive pooling to remove spatial dependency
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes),
+        )
+        
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass for classification model.
@@ -25,5 +42,29 @@ class VGG11Classifier(nn.Module):
         Returns:
             Classification logits [B, num_classes].
         """
-        # TODO: Implement forward pass.
-        raise NotImplementedError("Implement VGG11Classifier.forward")
+        # Extract features
+        x = self.encoder(x)
+
+        # Pool to fixed size
+        x = self.pool(x)
+
+        # Flatten
+        x = torch.flatten(x, 1)
+
+        # Classification head
+        x = self.classifier(x)
+
+        return x
+
+# ======================== ROUGH ===============================
+## To compare with pre trained on later occasion after training
+
+'''
+
+# from torchvision.models import vgg11_bn, VGG11_BN_Weights
+        # weights = VGG11_BN_Weights.DEFAULT
+        # vgg = vgg11_bn(weights=weights)
+        # # Only take convolutional backbone (feature extractor)
+        # self.encoder = vgg.features
+
+'''    

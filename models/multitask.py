@@ -19,8 +19,8 @@ class MultiTaskPerceptionModel(nn.Module):
             unet_path: Path to trained unet weights.
         """
         import gdown
-        gdown.download(id="<classifier.pth drive id>", output=classifier_path, quiet=False)
-        gdown.download(id="<localizer.pth drive id>", output=localizer_path, quiet=False)
+        gdown.download(id="1uEQSg3SMJ_cREqoymNbn3PixBeAAQNly", output=classifier_path, quiet=False)
+        gdown.download(id="1EYk6k6Ki7cDZ2mEd-07hYcWp36MVSWFu", output=localizer_path, quiet=False)
         gdown.download(id="<unet.pth drive id>", output=unet_path, quiet=False)
         pass
 
