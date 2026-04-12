@@ -4,6 +4,7 @@
 import torch
 import torch.nn as nn
 from models.vgg11 import VGG11Encoder  
+from models.layers import CustomDropout
 
 class VGG11Classifier(nn.Module):
     """Full classifier = VGG11Encoder + ClassificationHead."""
@@ -27,10 +28,10 @@ class VGG11Classifier(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(512, 512),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
+            CustomDropout(p= 0.5),
             nn.Linear(512, 128),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
+            CustomDropout(p= 0.5),
             nn.Linear(128, num_classes),
         )
         
@@ -55,16 +56,4 @@ class VGG11Classifier(nn.Module):
         x = self.classifier(x)
 
         return x
-
-# ======================== ROUGH ===============================
-## To compare with pre trained on later occasion after training
-
-'''
-
-# from torchvision.models import vgg11_bn, VGG11_BN_Weights
-        # weights = VGG11_BN_Weights.DEFAULT
-        # vgg = vgg11_bn(weights=weights)
-        # # Only take convolutional backbone (feature extractor)
-        # self.encoder = vgg.features
-
-'''    
+  

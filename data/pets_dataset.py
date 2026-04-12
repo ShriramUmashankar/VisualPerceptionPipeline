@@ -16,7 +16,7 @@ class OxfordIIITPetDataset(Dataset):
         self.task = task
         self.split = split
 
-        # 1. Define Albumentations for Training (trainval)
+        # Define Albumentations for Training 
         if self.split == "trainval":
             self.transform = A.Compose([
                 A.Resize(224, 224),
@@ -26,7 +26,7 @@ class OxfordIIITPetDataset(Dataset):
                 A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
                 ToTensorV2(),   
             ])
-        # 2. Basic Transforms for Testing (test)
+        # Basic Transforms for Testing (test)
         elif self.split == "test":
             self.transform = A.Compose([
                 A.Resize(224, 224),
@@ -69,19 +69,14 @@ class OxfordIIITPetDataset(Dataset):
     def __getitem__(self, idx):
         image, (label, mask) = self.dataset[idx]
 
-        # Convert PIL Images to NumPy arrays for Albumentations
         image_np = np.array(image.convert("RGB"))
         mask_np = np.array(mask)
-
-        # Apply transformations (Albumentations handles both image and mask concurrently)
         augmented = self.transform(image=image_np, mask=mask_np)
         
         # Extract transformed tensors
         image = augmented['image']
         mask = augmented['mask'].long()
 
-        # Adjust mask labels: Oxford uses 1 (foreground), 2 (background), 3 (border).
-        # We shift them to 0, 1, 2 for standard cross-entropy loss.
         mask = mask - 1 
 
         label = torch.tensor(label, dtype=torch.long)

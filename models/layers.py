@@ -38,8 +38,8 @@ class CustomDropout(nn.Module):
         if not self.training or self.p == 0.0:
             return x
 
-        if x.dim() == 1:
-            # FC-style (element-wise) dropout
+        if x.dim() in [1, 2]:
+            # Standard element-wise dropout (Handles FC layers after Flatten)
             mask = (torch.rand_like(x) > self.p).float()
             return x * mask / (1.0 - self.p)
 

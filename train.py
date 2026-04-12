@@ -13,8 +13,10 @@ from sklearn.metrics import f1_score
 
 from models.classification import VGG11Classifier
 from models.localization import VGG11Localizer
+from models.segmentation import VGG11UNet
 
-from losses import IoULoss
+from losses.iou_loss import IoULoss
+from losses.dice_loss import DiceLoss
 from data.pets_dataset import OxfordIIITPetDataset
 
 
@@ -34,8 +36,8 @@ def get_data_loaders(root, task, batch_size=32):
         task=task
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers= 8, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader
 
@@ -57,12 +59,22 @@ def build_model(task, config):
         )
 
     elif task == "segmentation":
-        raise NotImplementedError
+        return VGG11UNet(
+            dropout_p=config["dropout_p"],
+            checkpoint_path="checkpoints/classification.pth",
+            freeze_strategy= config["unet_freeze_strategy"],
+        )
 
     else:
         raise ValueError("Invalid task")
 
-
+def calculate_pixel_accuracy(output, mask):
+    with torch.no_grad():
+        preds = torch.argmax(output, dim=1)
+        correct = (preds == mask).sum().item()
+        total = mask.numel()
+        return correct / total
+    
 # =========================
 # LOSS FACTORY
 # =========================
@@ -71,10 +83,15 @@ def get_loss(task):
         return nn.CrossEntropyLoss()
 
     elif task == "localization":
-        return IoULoss(reduction="mean")
+        return {
+            "iou": IoULoss(reduction="mean"),
+            "mse": nn.MSELoss(),
+            "smooth": nn.SmoothL1Loss()
+
+        }
 
     elif task == "segmentation":
-        raise NotImplementedError
+        return DiceLoss()
 
 # =========================
 # TRAIN STEP
@@ -84,15 +101,43 @@ def train_one_epoch(model, loader, criterion, optimizer, device, task):
     
     total_loss = 0
     total_iou = 0
+    total_dice = 0
+    total_pix_acc = 0
     all_preds, all_labels = [], []
 
     for x, y in loader:
-        x, y = x.to(device), y.to(device)
+        x = x.to(device)
+
+        if task == "segmentation":
+            y = y.long().to(device)
+            if y.dim() == 4 and y.shape[1] == 1:
+                y = y.squeeze(1)
+
+            y = y - 1
+            y[y < 0] = 1
+            y[y > 2] = 1
+
+        elif task == "classification":
+            # CrossEntropy expects long integers
+            y = y.long().to(device)
+        elif task == "localization":
+            # Bounding box coordinates must remain floating point decimals
+            y = y.float().to(device)
 
         optimizer.zero_grad()
 
         output = model(x)
-        loss = criterion(output, y)
+
+        if task == "localization":
+            # criterion is now our dict from get_loss
+            output_norm = output / 224.0
+            y_norm = y / 224.0
+            loss_iou = criterion["iou"](output, y)
+            loss_smooth = criterion["smooth"](output_norm, y_norm)
+            # Combine them: 5.0 is a good starting weight for IoU
+            loss = (15.0 * loss_smooth) + (1.0 * loss_iou)
+        else:
+            loss = criterion(output, y)
 
         loss.backward()
         optimizer.step()
@@ -104,11 +149,15 @@ def train_one_epoch(model, loader, criterion, optimizer, device, task):
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
 
-        if task == "localization":
-            # Preds and targets are [B, 4]
-            # Calculate IoU for reporting [cite: 108]
-            batch_iou = 1 - loss.item() 
-            total_iou += batch_iou     
+        elif task == "localization":
+            # Since IoULoss = 1 - IoU, then IoU = 1 - loss_iou
+            current_iou = 1.0 - loss_iou.item()
+            total_iou += current_iou 
+
+        elif task == "segmentation":
+            # Metric for segmentation is 1 - DiceLoss
+            total_dice += (1.0 - loss.item())    
+            total_pix_acc += calculate_pixel_accuracy(output, y)  
 
     avg_loss = total_loss / len(loader)
 
@@ -118,9 +167,12 @@ def train_one_epoch(model, loader, criterion, optimizer, device, task):
         return avg_loss, {"f1": f1, "accuracy": acc}
 
     # Return dict update:
-    if task == "localization":
+    elif task == "localization":
         avg_iou = total_iou / len(loader)
         return avg_loss, {"iou": avg_iou}  
+    
+    elif task == "segmentation":
+        return avg_loss, {"dice": total_dice / len(loader), "pixel_acc": total_pix_acc / len(loader)}
 
     return avg_loss, {}
 
@@ -133,14 +185,44 @@ def validate(model, loader, criterion, device, task):
 
     total_loss = 0
     total_iou = 0
+    total_dice = 0
+    total_pix_acc = 0
     all_preds, all_labels = [], []
 
     with torch.no_grad():
         for x, y in loader:
-            x, y = x.to(device), y.to(device)
+            x = x.to(device)
+
+            if task == "segmentation":
+                y = y.long().to(device)
+                if y.dim() == 4 and y.shape[1] == 1:
+                    y = y.squeeze(1)
+
+                y = y - 1
+                y[y < 0] = 1
+                y[y > 2] = 1
+                
+            elif task == "classification":
+                # CrossEntropy expects long integers
+                y = y.long().to(device)
+            elif task == "localization":
+                # Bounding box coordinates must remain floating point decimals
+                y = y.float().to(device)
 
             output = model(x)
-            loss = criterion(output, y)
+
+            if task == "localization":
+                # criterion is now our dict from get_loss
+                output_norm = output / 224.0
+                y_norm = y / 224.0
+
+                loss_iou = criterion["iou"](output, y)
+                loss_smooth = criterion["smooth"](output_norm, y_norm)
+                
+                loss = (15.0 * loss_smooth) + (1.0 * loss_iou)
+            else:
+                loss = criterion(output, y)
+
 
             total_loss += loss.item()
 
@@ -149,11 +231,14 @@ def validate(model, loader, criterion, device, task):
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(y.cpu().numpy())
 
-            if task == "localization":
-                # Preds and targets are [B, 4]
-                # Calculate IoU for reporting [cite: 108]
-                batch_iou = 1 - loss.item() 
-                total_iou += batch_iou    
+            elif task == "localization":
+                # Since IoULoss = 1 - IoU, then IoU = 1 - loss_iou
+                current_iou = 1.0 - loss_iou.item()
+                total_iou += current_iou
+
+            elif task == "segmentation":
+                total_dice += (1.0 - loss.item())
+                total_pix_acc += calculate_pixel_accuracy(output, y)     
 
     avg_loss = total_loss / len(loader)
 
@@ -164,9 +249,12 @@ def validate(model, loader, criterion, device, task):
     
 
     # Return dict update:
-    if task == "localization":
+    elif task == "localization":
         avg_iou = total_iou / len(loader)
         return avg_loss, {"iou": avg_iou}
+    
+    elif task == "segmentation":
+        return avg_loss, {"dice": total_dice / len(loader), "pixel_acc": total_pix_acc / len(loader)}
 
     return avg_loss, {}
 
@@ -178,90 +266,56 @@ def validate(model, loader, criterion, device, task):
 # =========================
 
 def train(config):
-    wandb.init(
-        project="DA6401_Assignment_2",
-        group=config["task"],
-        name=config["run_name"],
-        config=config
-    )
-
+    wandb.init(project="DA6401_Assignment_2", 
+               group=config["task"], 
+               name=config["run_name"], 
+               config=config)
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Device being used is:", device)
-
+    print("Device being used is: ", device)
+    
     model = build_model(config["task"], config).to(device)
 
-    train_loader, val_loader = get_data_loaders(
-        root=config["data_root"],
-        task=config["task"],
-        batch_size=config["batch_size"]
-    )
+    checkpoint = torch.load("checkpoints/unet.pth", map_location=device)
+    model.load_state_dict(checkpoint["state_dict"])
 
+    train_loader, val_loader = get_data_loaders(root=config["data_root"], 
+                                                task=config["task"], 
+                                                batch_size=config["batch_size"])
+    
     criterion = get_loss(config["task"])
-
-    # filter() ensures we only optimize the head if the backbone is frozen (Task 2) 
-    optimizer = optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=config["lr"], 
-        weight_decay=1e-4 
-    )
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, 
+                                  model.parameters()), 
+                                  lr=config["lr"], 
+                                  weight_decay=1e-4)
 
     best_metric = -1
+    # Checkpoint name override for segmentation
+    ckpt_name = "unet.pth" if config["task"] == "segmentation" else f"{config['task']}.pth"
 
     for epoch in range(config["epochs"]):
-        train_loss, train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, config["task"]
-        )
+        t_loss, t_metrics = train_one_epoch(model, train_loader, criterion, optimizer, device, config["task"])
+        v_loss, v_metrics = validate(model, val_loader, criterion, device, config["task"])
 
-        val_loss, val_metrics = validate(
-            model, val_loader, criterion, device, config["task"]
-        )
-
-        log_dict = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-        }
-
-        # Add task-specific metrics to log_dict
-        for k, v in train_metrics.items():
-            log_dict[f"train_{k}"] = v
-        for k, v in val_metrics.items():
-            log_dict[f"val_{k}"] = v
+        log_dict = {"epoch": epoch, "train_loss": t_loss, "val_loss": v_loss}
+        log_dict.update({f"train_{k}": v for k, v in t_metrics.items()})
+        log_dict.update({f"val_{k}": v for k, v in v_metrics.items()})
 
         wandb.log(log_dict)
         print(f"Epoch {epoch}:", log_dict)
+        
+        # Saving Logic
+        if config["task"] == "classification": current_metric = v_metrics.get("f1", -1)
+        elif config["task"] == "localization": current_metric = v_metrics.get("iou", -1)
+        elif config["task"] == "segmentation": current_metric = v_metrics.get("dice", -1)
 
-        # =========================
-        # TASK-SPECIFIC SAVING LOGIC
-        # =========================
-        if config["task"] == "classification":
-            # Assignment requires Macro F1-Score 
-            current_metric = val_metrics.get("f1", -1)
-            
-        elif config["task"] == "localization":
-            # Primary training metric for detection is IoU 
-            current_metric = val_metrics.get("iou", -1)
-            
-        elif config["task"] == "segmentation":
-            # Assignment requires Dice Similarity Coefficient [cite: 79]
-            current_metric = val_metrics.get("dice", -1)
-        else:
-            current_metric = -1
-
-        # Save checkpoint if performance improved
         if current_metric > best_metric:
             best_metric = current_metric
-            
-            torch.save(
-                {
-                    "state_dict": model.state_dict(),
-                    "epoch": epoch,
-                    "best_metric": best_metric,
-                    "config": config
-                },
-                    
-                f"checkpoints/{config['task']}.pth"
-            )
+            torch.save({
+                "state_dict": model.state_dict(),
+                "epoch": epoch,
+                "best_metric": best_metric,
+            }, f"checkpoints/{ckpt_name}")
 
     print(f"Training Complete. Best {config['task']} metric: {best_metric}")
 
@@ -271,15 +325,17 @@ def train(config):
 # =========================
 if __name__ == "__main__":
     config = {
-        "task": "localization",
-        "run_name": "test",
+        "task": "segmentation",
+        "run_name": "run-2",
 
         "data_root": "./data",
-        "batch_size": 64,
-        "epochs": 25,
-        "lr": 3e-5,
+        "batch_size": 16,
+        "epochs": 30,
+        "lr": 5e-5,
         
-        "dropout_p": 0.4,
+        "dropout_p": 0.2,
+
+        "unet_freeze_strategy": "strict", # "strict", "partial", or "none"
     }
 
     train(config)
@@ -381,63 +437,4 @@ if __name__ == "__main__":
 
     print("Checking localization...")
     show_sample("localization")
-'''
-
-## Some more rought check code 
-
-'''
-
-# # only if retraining old model
-    # ckpt = torch.load("checkpoints/classification.pth", map_location=device)
-    # # ======================================================================
-    # old_sd = ckpt["state_dict"]
-
-    # new_sd = {}
-
-    # mapping = [
-    #     # block1
-    #     ("encoder.0", "encoder.block1.0"),
-    #     ("encoder.1", "encoder.block1.1"),
-
-    #     # block2
-    #     ("encoder.4", "encoder.block2.0"),
-    #     ("encoder.5", "encoder.block2.1"),
-
-    #     # block3
-    #     ("encoder.8",  "encoder.block3.0.0"),
-    #     ("encoder.9",  "encoder.block3.0.1"),
-    #     ("encoder.11", "encoder.block3.1.0"),
-    #     ("encoder.12", "encoder.block3.1.1"),
-
-    #     # block4
-    #     ("encoder.15", "encoder.block4.0.0"),
-    #     ("encoder.16", "encoder.block4.0.1"),
-    #     ("encoder.18", "encoder.block4.1.0"),
-    #     ("encoder.19", "encoder.block4.1.1"),
-
-    #     # block5
-    #     ("encoder.22", "encoder.block5.0.0"),
-    #     ("encoder.23", "encoder.block5.0.1"),
-    #     ("encoder.25", "encoder.block5.1.0"),
-    #     ("encoder.26", "encoder.block5.1.1"),
-    # ]
-
-    # for old_prefix, new_prefix in mapping:
-    #     for key in old_sd:
-    #         if key == old_prefix or key.startswith(old_prefix + "."):
-    #             new_key = key.replace(old_prefix, new_prefix)
-    #             new_sd[new_key] = old_sd[key]
-
-    # # also copy classifier weights directly
-    # for key in old_sd:
-    #     if not key.startswith("encoder."):
-    #         new_sd[key] = old_sd[key]
-
-    # missing, unexpected = model.load_state_dict(new_sd, strict=False)
-
-    # print("Missing keys:", missing)
-    # print("Length of missing keys:", len(missing))
-    # print("Unexpected keys:", unexpected)
-    # print("Length of unexpected keys:", len(unexpected))
-
 '''
